@@ -25,7 +25,7 @@ jobs:
         arch: [amd64, arm64]
     env:
       BOX_SHA: c005f35300ce76427dc285481ec5695f5b179cd2
-      SNELL_SHA: ea45e1f9f897137845d5f88baf9c8bc02af9a7d0
+      SNELL_SHA: a6a9f78f8172f75e7c686accca662fe9b58ae37e
       VERSION: 1.14.4-snellv6fix.2
       GOTOOLCHAIN: local
     steps:
@@ -86,6 +86,16 @@ jobs:
           cp LICENSE "../dist/$package/"
           cd ../dist
           sha256sum "$package/sing-box" > "$package/SHA256SUMS.binary"
+          tar -czf "$package.tar.gz" "$package"
+          sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
+      - name: Real binary UDP domain round trips on loopback
+        if: matrix.arch == 'amd64'
+        working-directory: snell
+        run: |
+          set -euo pipefail
+          package="sing-box-${VERSION}-linux-amd64"
+          go run .github/scripts/udp_e2e.go "$(realpath "../dist/$package/sing-box")" | tee "../dist/$package/E2E.txt"
+          cd ../dist
           tar -czf "$package.tar.gz" "$package"
           sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
       - name: Upload binaries and checksums (no deployment)

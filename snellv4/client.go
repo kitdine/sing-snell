@@ -3,6 +3,7 @@ package snellv4
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 
 	snell "github.com/sagernet/sing-snell"
 	"github.com/sagernet/sing-snell/internal/reuse"
@@ -22,7 +23,8 @@ type Client struct {
 	dialer  N.Dialer
 	server  M.Socksaddr
 
-	pool reuse.Pool[*reuseSession]
+	pool      reuse.Pool[*reuseSession]
+	closeIdle atomic.Bool
 }
 
 type ClientOptions struct {
@@ -31,6 +33,7 @@ type ClientOptions struct {
 	Reuse    bool
 	ObfsMode snell.ObfsMode
 	ObfsHost string
+	ObfsURI  string
 	Dialer   N.Dialer
 	Server   M.Socksaddr
 }
@@ -51,7 +54,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		psk:     options.PSK,
 		userKey: options.UserKey,
 		reuse:   options.Reuse,
-		obfs:    snell.ObfsConfig{Mode: options.ObfsMode, Host: options.ObfsHost},
+		obfs:    snell.ObfsConfig{Mode: options.ObfsMode, Host: options.ObfsHost, URI: options.ObfsURI},
 		dialer:  options.Dialer,
 		server:  options.Server,
 	}

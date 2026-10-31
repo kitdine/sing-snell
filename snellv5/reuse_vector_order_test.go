@@ -13,7 +13,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-func TestServerReuseVectorisedResponseCompletesBeforeCloseWrite(t *testing.T) {
+func TestServerReuseVectorisedResponseCompletesBeforeCloseWrite(t *testing.T) { //nolint:paralleltest // Changes process-wide GOMAXPROCS.
 	previousMaxProcs := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previousMaxProcs) })
 
@@ -127,6 +127,8 @@ func (w orderedVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 	return w(buffers)
 }
 
-var _ N.VectorisedWriter = orderedVectorisedWriter(nil)
-var _ reuse.RecordWriter = (*orderedRecordWriter)(nil)
-var _ net.Conn = (*serverReuseConn[struct{}])(nil)
+var (
+	_ N.VectorisedWriter = orderedVectorisedWriter(nil)
+	_ reuse.RecordWriter = (*orderedRecordWriter)(nil)
+	_ net.Conn           = (*serverReuseConn[struct{}])(nil)
+)

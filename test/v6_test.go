@@ -29,6 +29,11 @@ var v6Modes = map[string]snellv6.Mode{
 	"default":    snellv6.ModeDefault,
 }
 
+const (
+	v6UDPTestPSK         = "snell-rc-udp-0371991"
+	v6UDPTestPayloadSize = 1400
+)
+
 func TestV6TCP(t *testing.T) {
 	for name, mode := range v6Modes {
 		t.Run(name, func(t *testing.T) {
@@ -315,11 +320,11 @@ func TestV6UDP(t *testing.T) {
 	for name, mode := range v6Modes {
 		t.Run(name, func(t *testing.T) {
 			port := freePort(t)
-			startSnellServer(t, "v6", v6Config(testPSK, port, name), port)
+			startSnellServer(t, "v6", v6Config(v6UDPTestPSK, port, name), port)
 			echoPort := startUDPEcho(t)
 
 			client, err := snellv6.NewClient(snellv6.ClientOptions{
-				PSK:  []byte(testPSK),
+				PSK:  []byte(v6UDPTestPSK),
 				Mode: mode,
 			})
 			require.NoError(t, err)
@@ -329,14 +334,13 @@ func TestV6UDP(t *testing.T) {
 
 			packetConn, err := client.DialPacketConn(serverConn)
 			require.NoError(t, err)
+			require.GreaterOrEqual(t, N.CalculateMTU(packetConn, packetConn), v6UDPTestPayloadSize)
 			target := M.ParseSocksaddrHostPort("127.0.0.1", echoPort).UDPAddr()
 
 			for round := range 10 {
-				messageLen := 1200
-				if mode == snellv6.ModeDefault {
-					messageLen = 32
-				}
-				message := make([]byte, messageLen)
+				// Including its Snell UDP header, this exceeds the default-shaped
+				// first dynamic chunk limit for v6UDPTestPSK (1400 bytes).
+				message := make([]byte, v6UDPTestPayloadSize)
 				rand.Read(message)
 				_, err = packetConn.WriteTo(message, target)
 				require.NoError(t, err)
@@ -355,11 +359,11 @@ func TestV6UDPPacketBatchWriter(t *testing.T) {
 	for name, mode := range v6Modes {
 		t.Run(name, func(t *testing.T) {
 			port := freePort(t)
-			startSnellServer(t, "v6", v6Config(testPSK, port, name), port)
+			startSnellServer(t, "v6", v6Config(v6UDPTestPSK, port, name), port)
 			echoPort := startUDPEcho(t)
 
 			client, err := snellv6.NewClient(snellv6.ClientOptions{
-				PSK:  []byte(testPSK),
+				PSK:  []byte(v6UDPTestPSK),
 				Mode: mode,
 			})
 			require.NoError(t, err)
@@ -375,10 +379,7 @@ func TestV6UDPPacketBatchWriter(t *testing.T) {
 			target := M.ParseSocksaddrHostPort("127.0.0.1", echoPort)
 			frontHeadroom := N.CalculateFrontHeadroom(packetConn)
 			rearHeadroom := N.CalculateRearHeadroom(packetConn)
-			payloadSize := 1200
-			if mode == snellv6.ModeDefault {
-				payloadSize = 32
-			}
+			payloadSize := v6UDPTestPayloadSize
 			payloads := make([][]byte, 3)
 			buffers := make([]*buf.Buffer, len(payloads))
 			destinations := make([]M.Socksaddr, len(payloads))

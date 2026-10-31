@@ -181,13 +181,7 @@ func (s *Service) newConnection(ctx context.Context, conn net.Conn, source M.Soc
 			return errInvalidUDPTunnelRequest
 		}
 		record.Release()
-		packetConn := &serverPacketConn{Conn: conn, service: s, reader: reader}
-		err = packetConn.writeTunnelReply()
-		if err != nil {
-			return err
-		}
-		s.handler.NewPacketConnectionEx(ctx, packetConn, source, M.Socksaddr{}, onClose)
-		return nil
+		return s.newPacketConnection(ctx, &serverPacketConn{Conn: conn, service: s, reader: reader}, source, onClose)
 	case snell.CommandPing:
 		record.Release()
 		pong := [1]byte{snell.ReplyPong}
@@ -201,6 +195,21 @@ func (s *Service) newConnection(ctx context.Context, conn net.Conn, source M.Soc
 		record.Release()
 		return E.Extend(snell.ErrUnsupportedCommand, request.Command)
 	}
+}
+
+func (s *Service) newPacketConnection(ctx context.Context, packetConn *serverPacketConn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
+	err := packetConn.writeTunnelReply()
+	if err != nil {
+		return err
+	}
+	firstPacket := buf.NewPacket()
+	destination, err := packetConn.ReadPacket(firstPacket)
+	if err != nil {
+		firstPacket.Release()
+		return E.Cause(err, "read first packet")
+	}
+	s.handler.NewPacketConnectionEx(ctx, bufio.NewCachedPacketConn(packetConn, firstPacket, destination), source, destination, onClose)
+	return nil
 }
 
 func (s *MultiService[U]) newConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
@@ -246,13 +255,7 @@ func (s *MultiService[U]) newConnection(ctx context.Context, conn net.Conn, sour
 			return errInvalidUDPTunnelRequest
 		}
 		record.Release()
-		packetConn := &serverPacketConn{Conn: conn, service: s.Service, reader: reader}
-		err = packetConn.writeTunnelReply()
-		if err != nil {
-			return err
-		}
-		s.handler.NewPacketConnectionEx(requestCtx, packetConn, source, M.Socksaddr{}, onClose)
-		return nil
+		return s.newPacketConnection(requestCtx, &serverPacketConn{Conn: conn, service: s.Service, reader: reader}, source, onClose)
 	case snell.CommandPing:
 		record.Release()
 		pong := [1]byte{snell.ReplyPong}

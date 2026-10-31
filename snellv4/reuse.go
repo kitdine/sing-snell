@@ -11,7 +11,9 @@ import (
 
 	snell "github.com/sagernet/sing-snell"
 	"github.com/sagernet/sing-snell/internal/reuse"
+	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -22,6 +24,9 @@ func (c *Client) DialContext(ctx context.Context, destination M.Socksaddr) (net.
 		session, err := c.reuseSession(ctx)
 		if err != nil {
 			return nil, err
+		}
+		if snell.KeepSessionFromContext(ctx) {
+			session.keepOnce.Store(true)
 		}
 		conn, err := session.DialConn(destination)
 		if err != nil {
@@ -40,12 +45,10 @@ func (c *Client) DialContext(ctx context.Context, destination M.Socksaddr) (net.
 	if err != nil {
 		return nil, err
 	}
-	proxyConn, err := c.DialConn(conn, destination)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return proxyConn, nil
+	// Surge 6.4.4 (10661): -[SNConnectorV4 targetHandshakeData] appends the connector early data to
+	// the handshake buffer, and -[SNConnectorV4 firstDataPacket] encrypts and obfuscates the result
+	// in one piece, so the first record, and with obfs the first HTTP request body, carries both.
+	return c.DialEarlyConn(conn, destination), nil
 }
 
 func (c *Client) reuseSession(ctx context.Context) (*reuseSession, error) {
@@ -78,6 +81,19 @@ func (c *Client) Reset() {
 	}
 }
 
+func (c *Client) SetKeepIdleConnections(keep bool) {
+	c.closeIdle.Store(!keep)
+	if !keep {
+		c.CloseIdleConnections()
+	}
+}
+
+func (c *Client) CloseIdleConnections() {
+	if c.reuse {
+		c.pool.Reset()
+	}
+}
+
 func (c *Client) Close() error {
 	return c.pool.Close()
 }
@@ -86,9 +102,10 @@ type reuseSession struct {
 	net.Conn
 	client *Client
 
-	state  atomic.Uint32
-	reader *reader
-	writer *writer
+	state    atomic.Uint32
+	keepOnce atomic.Bool
+	reader   *reader
+	writer   *writer
 }
 
 func (c *Client) newReuseSession(conn net.Conn) *reuseSession {
@@ -108,31 +125,15 @@ func (s *reuseSession) DialConn(destination M.Socksaddr) (net.Conn, error) {
 		return nil, E.New("snell: reuse session is busy")
 	}
 
-	requestPayload := snell.Request{Command: snell.CommandConnectV2, ClientID: s.client.userKey, Destination: destination}
-	request := buf.NewSize(requestPayload.Len())
-	err := requestPayload.Write(request)
-	if err != nil {
-		request.Release()
-		s.Release(false)
-		return nil, err
-	}
-	if s.writer == nil {
-		s.writer = &writer{
-			upstream: s.Conn,
-			psk:      s.client.psk,
-		}
-	}
-	_, err = s.writer.Write(request.Bytes())
-	request.Release()
-	if err != nil {
-		s.Release(false)
-		return nil, E.Cause(err, "write request")
-	}
 	return &reuseConn{Conn: s.Conn, session: s, destination: destination}, nil
 }
 
+func (s *reuseSession) closeIdle() bool {
+	return s.client.closeIdle.Load() && !s.keepOnce.Swap(false)
+}
+
 func (s *reuseSession) Release(reusable bool) {
-	if !reusable {
+	if !reusable || s.closeIdle() {
 		s.Close()
 		return
 	}
@@ -153,6 +154,10 @@ func (s *reuseSession) Close() error {
 }
 
 func (s *reuseSession) startDrain() {
+	if s.closeIdle() {
+		s.Close()
+		return
+	}
 	if !s.state.CompareAndSwap(uint32(reuse.StateActive), uint32(reuse.StateWaiting)) {
 		if reuse.State(s.state.Load()) != reuse.StateClosed {
 			s.Close()
@@ -194,6 +199,8 @@ type reuseConn struct {
 	session     *reuseSession
 	destination M.Socksaddr
 
+	access          sync.Mutex
+	writer          *writer
 	closeWriteOnce  sync.Once
 	closeWriteErr   error
 	closeOnce       sync.Once
@@ -310,21 +317,139 @@ func (c *reuseConn) ReadBuffer(buffer *buf.Buffer) error {
 	}
 }
 
+func (c *reuseConn) writeRequest(payload []byte) error {
+	requestPayload := snell.Request{Command: snell.CommandConnectV2, ClientID: c.session.client.userKey, Destination: c.destination}
+	request := buf.NewSize(requestPayload.Len() + len(payload))
+	err := requestPayload.Write(request)
+	if err != nil {
+		request.Release()
+		return err
+	}
+	if len(payload) > 0 {
+		common.Must1(request.Write(payload))
+	}
+	defer request.Release()
+
+	if c.session.writer == nil {
+		c.session.writer = &writer{
+			upstream: c.session.Conn,
+			psk:      c.session.client.psk,
+		}
+	}
+	_, err = c.session.writer.Write(request.Bytes())
+	if err != nil {
+		c.session.Release(false)
+		return E.Cause(err, "write request")
+	}
+	c.writer = c.session.writer
+	return nil
+}
+
+func (c *reuseConn) writeRequestBuffer(buffer *buf.Buffer) error {
+	requestPayload := snell.Request{Command: snell.CommandConnectV2, ClientID: c.session.client.userKey, Destination: c.destination}
+	request := buf.With(buffer.ExtendHeader(requestPayload.Len()))
+	err := requestPayload.Write(request)
+	if err != nil {
+		buffer.Release()
+		return err
+	}
+	if c.session.writer == nil {
+		c.session.writer = &writer{
+			upstream: c.session.Conn,
+			psk:      c.session.client.psk,
+		}
+	}
+	err = c.session.writer.WriteBuffer(buffer)
+	if err != nil {
+		c.session.Release(false)
+		return E.Cause(err, "write request")
+	}
+	c.writer = c.session.writer
+	return nil
+}
+
 func (c *reuseConn) Write(p []byte) (int, error) {
-	return c.session.writer.Write(p)
+	if c.writer != nil {
+		return c.writer.Write(p)
+	}
+	c.access.Lock()
+	if c.writer != nil {
+		c.access.Unlock()
+		return c.writer.Write(p)
+	}
+	defer c.access.Unlock()
+	err := c.writeRequest(p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func (c *reuseConn) WriteBuffer(buffer *buf.Buffer) error {
-	return c.session.writer.WriteBuffer(buffer)
+	if c.writer != nil {
+		return c.writer.WriteBuffer(buffer)
+	}
+	c.access.Lock()
+	if c.writer != nil {
+		c.access.Unlock()
+		return c.writer.WriteBuffer(buffer)
+	}
+	defer c.access.Unlock()
+	return c.writeRequestBuffer(buffer)
 }
 
 func (c *reuseConn) CreateVectorisedWriter() (N.VectorisedWriter, bool) {
-	return c.session.writer.CreateVectorisedWriter()
+	upstreamWriter, created := bufio.CreateVectorisedWriter(c.session.Conn)
+	if !created {
+		return nil, false
+	}
+	return &reuseVectorisedWriter{conn: c, upstream: upstreamWriter}, true
+}
+
+type reuseVectorisedWriter struct {
+	conn     *reuseConn
+	upstream N.VectorisedWriter
+}
+
+func (w *reuseVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
+	conn := w.conn
+	if conn.writer != nil {
+		return conn.writer.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers)
+	}
+	conn.access.Lock()
+	defer conn.access.Unlock()
+	if conn.writer != nil {
+		return conn.writer.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers)
+	}
+	for index, buffer := range buffers {
+		if buffer.IsEmpty() {
+			buffer.Release()
+			continue
+		}
+		err := conn.writeRequestBuffer(buffer)
+		if err != nil {
+			buf.ReleaseMulti(buffers[index+1:])
+			return err
+		}
+		if index+1 < len(buffers) {
+			return conn.writer.CreateVectorisedWriterFor(w.upstream).WriteVectorised(buffers[index+1:])
+		}
+		return nil
+	}
+	return nil
 }
 
 func (c *reuseConn) CloseWrite() error {
 	c.closeWriteOnce.Do(func() {
-		c.closeWriteErr = c.session.writer.WriteZeroChunk()
+		c.access.Lock()
+		defer c.access.Unlock()
+		if c.writer == nil {
+			c.closeWriteErr = c.writeRequest(nil)
+			if c.closeWriteErr != nil {
+				return
+			}
+		}
+		c.closeWriteErr = c.writer.WriteZeroChunk()
 	})
 	return c.closeWriteErr
 }
@@ -345,6 +470,10 @@ func (c *reuseConn) Close() error {
 		c.session.Conn.SetWriteDeadline(time.Time{})
 		if c.readClosed.Load() {
 			c.session.Release(true)
+			return
+		}
+		if c.session.closeIdle() {
+			c.session.Close()
 			return
 		}
 		// Surge 6.7.0 (11520): SNConnectorV4::readServerEOFIfNotInReadState: starts waiting-state EOF
@@ -431,7 +560,11 @@ func (w *reuseReadWaiter) WaitReadBuffer() (*buf.Buffer, error) {
 }
 
 func (c *reuseConn) FrontHeadroom() int {
-	return c.session.writer.FrontHeadroom()
+	if c.writer != nil {
+		return c.writer.FrontHeadroom()
+	}
+	requestPayload := snell.Request{Command: snell.CommandConnectV2, ClientID: c.session.client.userKey, Destination: c.destination}
+	return requestPayload.Len() + snell.SaltLen + snell.HeaderCipherLen + maxInitialPaddingLen
 }
 
 func (c *reuseConn) RearHeadroom() int {
@@ -444,6 +577,10 @@ func (c *reuseConn) WriterMTU() int {
 
 func (c *reuseConn) NeedHandshakeForRead() bool {
 	return !c.replyRead.Load()
+}
+
+func (c *reuseConn) NeedHandshakeForWrite() bool {
+	return c.writer == nil
 }
 
 func (c *reuseConn) NeedAdditionalReadDeadline() bool {
@@ -463,6 +600,8 @@ var (
 	_ N.ReadWaitCreator        = (*reuseConn)(nil)
 	_ N.VectorisedWriteCreator = (*reuseConn)(nil)
 	_ N.EarlyReader            = (*reuseConn)(nil)
+	_ N.EarlyWriter            = (*reuseConn)(nil)
 	_ N.WriteCloser            = (*reuseConn)(nil)
+	_ N.VectorisedWriter       = (*reuseVectorisedWriter)(nil)
 	_ N.ReadWaiter             = (*reuseReadWaiter)(nil)
 )

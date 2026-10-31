@@ -206,23 +206,7 @@ func (c *clientPacketConn) RearHeadroom() int {
 }
 
 func (c *clientPacketConn) WriterMTU() int {
-	switch c.client.mode {
-	case ModeUnsafeRaw, ModeUnshaped:
-		return maxPayload - maxUDPRequestHeaderLen
-	default:
-		payloadLimit := c.client.profile.chunkInitial
-		switch c.client.profile.chunkPolicy {
-		case 1:
-			payloadLimit = c.client.profile.chunkBuckets[0]
-			for _, chunkBucket := range c.client.profile.chunkBuckets[1:] {
-				payloadLimit = min(payloadLimit, chunkBucket)
-			}
-		case 2:
-			payloadLimit -= c.client.profile.chunkJitter
-		}
-		payloadLimit = max(0x40, min(payloadLimit, c.client.profile.chunkMax))
-		return max(1, payloadLimit-maxUDPRequestHeaderLen)
-	}
+	return maxPayload - maxUDPRequestHeaderLen
 }
 
 func (c *clientPacketConn) Upstream() any {
@@ -414,23 +398,7 @@ func (c *serverPacketConn) RearHeadroom() int {
 }
 
 func (c *serverPacketConn) WriterMTU() int {
-	switch c.service.mode {
-	case ModeUnsafeRaw, ModeUnshaped:
-		return maxPayload - maxUDPResponseHeaderLen
-	default:
-		payloadLimit := c.service.profile.chunkInitial
-		switch c.service.profile.chunkPolicy {
-		case 1:
-			payloadLimit = c.service.profile.chunkBuckets[0]
-			for _, chunkBucket := range c.service.profile.chunkBuckets[1:] {
-				payloadLimit = min(payloadLimit, chunkBucket)
-			}
-		case 2:
-			payloadLimit -= c.service.profile.chunkJitter
-		}
-		payloadLimit = max(0x40, min(payloadLimit, c.service.profile.chunkMax))
-		return max(1, payloadLimit-maxUDPResponseHeaderLen)
-	}
+	return maxPayload - maxUDPResponseHeaderLen
 }
 
 func (c *serverPacketConn) Upstream() any {

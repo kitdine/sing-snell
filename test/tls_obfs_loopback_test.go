@@ -228,6 +228,8 @@ func TestV5ServerReuseRejectsWritesAfterCloseWrite(t *testing.T) {
 	defer cancel()
 	conn, err := client.DialContext(ctx, M.ParseSocksaddrHostPort("127.0.0.1", 443))
 	require.NoError(t, err)
+	_, err = conn.Write([]byte("request"))
+	require.NoError(t, err)
 	result := <-handler.results
 	require.NoError(t, result.responseErr)
 	require.NoError(t, result.closeWriteErr)

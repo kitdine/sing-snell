@@ -64,14 +64,13 @@ func (s *serverReuseSession[U]) Serve(ctx context.Context, source M.Socksaddr, o
 			}
 			record.Release()
 			packetConn := &serverPacketConn{Conn: s.Conn, service: s.service, reader: s.reader, writer: s.writer}
-			err = packetConn.writeTunnelReply()
+			err = s.service.newPacketConnection(requestCtx, packetConn, source, onClose)
 			if err != nil {
 				s.Conn.Close()
 				return err
 			}
 			s.writer = packetConn.writer
 			callOnClose = false
-			s.service.handler.NewPacketConnectionEx(requestCtx, packetConn, source, M.Socksaddr{}, onClose)
 			return nil
 		case snell.CommandPing:
 			record.Release()

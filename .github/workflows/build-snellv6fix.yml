@@ -43,6 +43,12 @@ jobs:
           ref: ${{ env.BOX_SHA }}
           path: sing-box
           persist-credentials: false
+      - name: Checkout test harness at exact workflow revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
       - name: Setup pinned Go toolchain
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -90,7 +96,7 @@ jobs:
           sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
       - name: Real binary UDP domain round trips on loopback
         if: matrix.arch == 'amd64'
-        working-directory: snell
+        working-directory: harness
         run: |
           set -euo pipefail
           package="sing-box-${VERSION}-linux-amd64"

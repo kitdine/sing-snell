@@ -7,6 +7,7 @@ import (
 	"github.com/sagernet/sing-snell/snellv6"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -68,8 +69,8 @@ func run(mode snellv6.Mode) error {
 	}
 	defer log.Close()
 	cmd := exec.Command(binary, "run", "-c", config)
-	cmd.Stdout = log
-	cmd.Stderr = log
+	cmd.Stdout = io.MultiWriter(log, os.Stderr)
+	cmd.Stderr = io.MultiWriter(log, os.Stderr)
 	if err = cmd.Start(); err != nil {
 		return err
 	}

@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/build-snellv6fix.yml'
       - 'BUILD_SNELLV6.md'
+      - 'patches/**'
+      - '.github/scripts/**'
   workflow_dispatch:
 
 permissions:
@@ -26,7 +28,7 @@ jobs:
     env:
       BOX_SHA: c005f35300ce76427dc285481ec5695f5b179cd2
       SNELL_SHA: a6a9f78f8172f75e7c686accca662fe9b58ae37e
-      VERSION: 1.14.4-snellv6fix.2
+      VERSION: 1.14.4-snellv6fix.3
       GOTOOLCHAIN: local
     steps:
       - name: Checkout fixed Snell source (immutable revision)
@@ -69,9 +71,11 @@ jobs:
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
+          git apply --check ../harness/patches/sing-box-resolve-domain-unmapping.patch
+          git apply ../harness/patches/sing-box-resolve-domain-unmapping.patch
           go mod edit -replace=github.com/sagernet/sing-snell=../snell
           go mod download
-          go test ./protocol/snell ./route
+          go test -race ./common/dialer ./protocol/snell ./route
           test "$(go list -m -f '{{.Replace.Dir}}' github.com/sagernet/sing-snell)" = "$(realpath ../snell)"
           tags="$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
           package="sing-box-${VERSION}-linux-${TARGET_ARCH}"
@@ -84,6 +88,7 @@ jobs:
             printf 'version=%s\nsing_box_commit=%s\nsing_snell_commit=%s\nworkflow_commit=%s\n' "$VERSION" "$BOX_SHA" "$SNELL_SHA" "$GITHUB_SHA"
             printf 'go=%s\ntarget=linux/%s\nbuild_tags=%s\n' "$(go version)" "$TARGET_ARCH" "$tags"
             printf '\nModule replacement: github.com/sagernet/sing-snell => exact checkout above\n\n'
+            sha256sum ../harness/patches/sing-box-resolve-domain-unmapping.patch
             go version -m "../dist/$package/sing-box"
           } > "../dist/$package/BUILD-PROVENANCE.txt"
           if [ "$TARGET_ARCH" = amd64 ]; then

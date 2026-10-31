@@ -1,0 +1,140 @@
+diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
+index 8fa48f6b..c90a1a73 100644
+--- a/common/dialer/resolve.go
++++ b/common/dialer/resolve.go
+@@ -128,7 +128,7 @@ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksadd
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
++	return newResolvePacketConn(ctx, conn, M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
+ }
+ 
+ func (d *resolveDialer) QueryOptions() adapter.DNSQueryOptions {
+@@ -182,7 +182,7 @@ func (d *resolveParallelNetworkDialer) ListenSerialInterfacePacket(ctx context.C
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
++	return newResolvePacketConn(ctx, conn, M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
+ }
+ 
+ func (d *resolveParallelNetworkDialer) QueryOptions() adapter.DNSQueryOptions {
+@@ -192,3 +192,12 @@ func (d *resolveParallelNetworkDialer) QueryOptions() adapter.DNSQueryOptions {
+ func (d *resolveParallelNetworkDialer) Upstream() any {
+ 	return d.dialer
+ }
++
++// newResolvePacketConn preserves IP response addresses when required by the
++// inbound protocol, just like the connection manager's explicit-resolution path.
++func newResolvePacketConn(ctx context.Context, conn net.PacketConn, resolved, destination M.Socksaddr) net.PacketConn {
++	if metadata := adapter.ContextFrom(ctx); metadata != nil && metadata.UDPDisableDomainUnmapping {
++		return bufio.NewUnidirectionalNATPacketConn(bufio.NewPacketConn(conn), resolved, destination)
++	}
++	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), resolved, destination)
++}
+diff --git a/common/dialer/resolve_udp_test.go b/common/dialer/resolve_udp_test.go
+new file mode 100644
+index 00000000..bc3a2769
+--- /dev/null
++++ b/common/dialer/resolve_udp_test.go
+@@ -0,0 +1,99 @@
++package dialer
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing/common/buf"
++	"github.com/sagernet/sing/common/bufio"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++type udpTestDNSRouter struct{ adapter.DNSRouter }
++
++func (udpTestDNSRouter) Lookup(context.Context, string, adapter.DNSQueryOptions) ([]netip.Addr, error) {
++	return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
++}
++
++type udpTestDialer struct{ ParallelInterfaceDialer }
++
++func (udpTestDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return net.ListenPacket("udp4", "127.0.0.1:0")
++}
++func (d udpTestDialer) ListenSerialInterfacePacket(ctx context.Context, dst M.Socksaddr, _ *C.NetworkStrategy, _ []C.InterfaceType, _ []C.InterfaceType, _ time.Duration) (net.PacketConn, error) {
++	return d.ListenPacket(ctx, dst)
++}
++
++func TestResolveUDPDomainUnmapping(t *testing.T) {
++	t.Parallel()
++	for _, parallel := range []bool{false, true} {
++		for _, metadataMode := range []string{"none", "default", "disabled"} {
++			t.Run(fmt.Sprintf("parallel=%t/metadata=%s", parallel, metadataMode), func(t *testing.T) {
++				t.Parallel()
++				sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer sink.Close()
++				destination := M.ParseSocksaddrHostPort("udp-resolver-test.invalid", 500)
++				ctx := t.Context()
++				if metadataMode != "none" {
++					ctx = adapter.WithContext(ctx, &adapter.InboundContext{UDPDisableDomainUnmapping: metadataMode == "disabled"})
++				}
++				base := resolveDialer{router: udpTestDNSRouter{}, dialer: udpTestDialer{}}
++				var conn net.PacketConn
++				if parallel {
++					d := resolveParallelNetworkDialer{resolveDialer: resolveDialer{router: udpTestDNSRouter{}, dialer: udpTestDialer{}}, dialer: udpTestDialer{}}
++					conn, err = d.ListenSerialInterfacePacket(ctx, destination, nil, nil, nil, 0)
++				} else {
++					conn, err = base.ListenPacket(ctx, destination)
++				}
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer conn.Close()
++				// Preserve subsequent packet ports, not only the first routing port.
++				destination.Port = uint16(sink.LocalAddr().(*net.UDPAddr).Port)
++				packet := bufio.NewPacketConn(conn)
++				if err = packet.WritePacket(buf.As([]byte("request")), destination); err != nil {
++					t.Fatal(err)
++				}
++				sink.SetReadDeadline(time.Now().Add(time.Second))
++				raw := make([]byte, 32)
++				n, from, err := sink.ReadFromUDP(raw)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if string(raw[:n]) != "request" {
++					t.Fatal("request corrupted")
++				}
++				if _, err = sink.WriteToUDP([]byte("reply"), from); err != nil {
++					t.Fatal(err)
++				}
++				conn.SetReadDeadline(time.Now().Add(time.Second))
++				response := buf.NewPacket()
++				defer response.Release()
++				address, err := packet.ReadPacket(response)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if metadataMode == "disabled" {
++					if !address.IsIP() {
++						t.Fatalf("UDPDisableDomainUnmapping ignored: got %s", address)
++					}
++				} else if address.Fqdn != destination.Fqdn {
++					t.Fatalf("default mapping changed: got %s", address)
++				}
++				if address.Port != destination.Port || string(response.Bytes()) != "reply" {
++					t.Fatal("reply corrupted")
++				}
++			})
++		}
++	}
++}

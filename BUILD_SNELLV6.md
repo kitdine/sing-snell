@@ -7,9 +7,13 @@ This branch refreshes the existing kitdine fork; it is not a patch on the old al
 - Latest stable sing-box: **v1.14.4**, `c005f35300ce76427dc285481ec5695f5b179cd2`.
 - Latest sing-snell main, already selected by stable sing-box: `bc5a12ac736f235b2de2926ecd2791cc925e6b8c`.
 - Custom source used by the build: `a6a9f78f8172f75e7c686accca662fe9b58ae37e`.
-- Output version: **1.14.4-snellv6fix.2**, Linux amd64 and arm64.
+- Output version: **1.14.4-snellv6fix.3**, Linux amd64 and arm64.
 
 The old custom branch differs from its upstream c43fbee baseline by exactly one commit, f2a0337: shaped-record buffer headroom fallback and its regression tests. That fix is still absent from current upstream. It is reapplied here while retaining newer rc1 packet chunk-state logic. Domain UDP first-packet routing (f8ab802) and IP-only UDP responses in sing-box (33e63af) are already upstream and are not reapplied.
+
+## Additional stable resolver defect found by real-binary E2E
+
+The first real-binary cloud test successfully resolved the domain but failed its response with `snell: udp response source is not an ip`. Stable sing-box's resolver dialer applied bidirectional NAT without honoring `UDPDisableDomainUnmapping`, bypassing the otherwise-correct outer route behavior. The build now applies `patches/sing-box-resolve-domain-unmapping.patch` to the pinned stable checkout before compiling. It fixes both normal and parallel-interface resolver paths, preserves default behavior when metadata is absent/false, and adds six real UDP echo regressions using the actual resolver entrypoints including subsequent port changes. Both flag=true cases failed before the fix. Patch SHA256 is recorded alongside base and custom-source revisions. The previous `.2` artifacts should not be deployed as a validated fix; `.3` distinguishes this additional correction.
 
 ## Build safety and verification
 

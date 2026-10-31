@@ -114,7 +114,7 @@ func run(mode snellv6.Mode) error {
 			if err != nil {
 				return fmt.Errorf("%s %s size%d read: %w", mode, host, size, err)
 			}
-			if from.Addr.String() != "127.0.0.2" || !bytes.Equal(reply.Bytes(), payload) {
+			if from.Addr.String() != "127.0.0.2" || from.IsDomain() || from.Port != target.Port || !bytes.Equal(reply.Bytes(), payload) {
 				return fmt.Errorf("bad response from %v length%d", from, reply.Len())
 			}
 			reply.Release()

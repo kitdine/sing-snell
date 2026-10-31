@@ -1,0 +1,99 @@
+name: Build sing-box stable with Snell v6 fix
+
+on:
+  push:
+    branches: [build/snellv6-latest-20261031]
+    paths:
+      - '.github/workflows/build-snellv6fix.yml'
+      - 'BUILD_SNELLV6.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snellv6fix-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      BOX_SHA: c005f35300ce76427dc285481ec5695f5b179cd2
+      SNELL_SHA: ea45e1f9f897137845d5f88baf9c8bc02af9a7d0
+      VERSION: 1.14.4-snellv6fix.2
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout fixed Snell source (immutable revision)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: kitdine/sing-snell
+          ref: ${{ env.SNELL_SHA }}
+          path: snell
+          persist-credentials: false
+      - name: Checkout upstream stable sing-box (immutable revision)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: SagerNet/sing-box
+          ref: ${{ env.BOX_SHA }}
+          path: sing-box
+          persist-credentials: false
+      - name: Setup pinned Go toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: |
+            snell/go.sum
+            sing-box/go.sum
+      - name: Verify source pins and run Snell regressions
+        working-directory: snell
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNELL_SHA"
+          test "$(git -C ../sing-box rev-parse HEAD)" = "$BOX_SHA"
+          go test -race -count=3 ./...
+      - name: Build and record provenance
+        working-directory: sing-box
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          go mod edit -replace=github.com/sagernet/sing-snell=../snell
+          go mod download
+          go test ./protocol/snell ./route
+          test "$(go list -m -f '{{.Replace.Dir}}' github.com/sagernet/sing-snell)" = "$(realpath ../snell)"
+          tags="$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+          package="sing-box-${VERSION}-linux-${TARGET_ARCH}"
+          mkdir -p "../dist/$package"
+          CGO_ENABLED=0 GOOS=linux GOARCH="$TARGET_ARCH" go build -buildvcs=false -trimpath \
+            -tags "$tags" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=$VERSION $(cat release/LDFLAGS) -s -w -buildid=" \
+            -o "../dist/$package/sing-box" ./cmd/sing-box
+          {
+            printf 'version=%s\nsing_box_commit=%s\nsing_snell_commit=%s\nworkflow_commit=%s\n' "$VERSION" "$BOX_SHA" "$SNELL_SHA" "$GITHUB_SHA"
+            printf 'go=%s\ntarget=linux/%s\nbuild_tags=%s\n' "$(go version)" "$TARGET_ARCH" "$tags"
+            printf '\nModule replacement: github.com/sagernet/sing-snell => exact checkout above\n\n'
+            go version -m "../dist/$package/sing-box"
+          } > "../dist/$package/BUILD-PROVENANCE.txt"
+          if [ "$TARGET_ARCH" = amd64 ]; then
+            "../dist/$package/sing-box" version | tee "../dist/$package/VERSION.txt"
+          fi
+          cp LICENSE "../dist/$package/"
+          cd ../dist
+          sha256sum "$package/sing-box" > "$package/SHA256SUMS.binary"
+          tar -czf "$package.tar.gz" "$package"
+          sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
+      - name: Upload binaries and checksums (no deployment)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sing-box-${{ env.VERSION }}-linux-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
